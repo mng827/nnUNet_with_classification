@@ -1,5 +1,7 @@
 import multiprocessing
 import os
+import pandas as pd
+from sklearn.metrics import confusion_matrix
 from copy import deepcopy
 from multiprocessing import Pool
 from typing import Tuple, List, Union, Optional
@@ -15,6 +17,8 @@ from nnunetv2.imageio.simpleitk_reader_writer import SimpleITKIO
 # the Evaluator class of the previous nnU-Net was great and all but man was it overengineered. Keep it simple
 from nnunetv2.utilities.json_export import recursive_fix_for_json_export
 from nnunetv2.utilities.plans_handling.plans_handler import PlansManager
+
+import surface_distance
 
 
 def label_or_region_to_key(label_or_region: Union[int, Tuple[int]]):
@@ -116,6 +120,13 @@ def compute_metrics(reference_file: str, prediction_file: str, image_reader_writ
         results['metrics'][r]['TN'] = tn
         results['metrics'][r]['n_pred'] = fp + tp
         results['metrics'][r]['n_ref'] = fn + tp
+
+        surface_distances = surface_distance.compute_surface_distances(seg_ref[0] == r, seg_pred[0] == r, spacing_mm=seg_ref_dict['spacing'])
+        gt_to_pred, pred_to_gt = surface_distance.compute_average_surface_distance(surface_distances)
+        hd_95 = surface_distance.compute_robust_hausdorff(surface_distances, 95)
+
+        results['metrics'][r]['asd'] = (gt_to_pred + pred_to_gt) / 2
+        results['metrics'][r]['hd_95'] = np.nan if np.isinf(hd_95) else hd_95
     return results
 
 
@@ -168,7 +179,18 @@ def compute_metrics_on_folder(folder_ref: str, folder_pred: str, output_file: st
     [recursive_fix_for_json_export(i) for i in results]
     recursive_fix_for_json_export(means)
     recursive_fix_for_json_export(foreground_mean)
-    result = {'metric_per_case': results, 'mean': means, 'foreground_mean': foreground_mean}
+
+    # Calculate classification accuracy
+    classification_results = pd.read_csv(join(folder_pred, "subtype_results.csv"))
+    gt = classification_results['GT_Subtype'].to_numpy(np.uint8)
+    pred = classification_results['Pred_Subtype'].to_numpy(np.uint8)
+    classification_confusion_matrix = confusion_matrix(gt, pred, labels=np.arange(3))
+    correct = np.sum(np.diagonal(classification_confusion_matrix))
+    total = np.sum(classification_confusion_matrix)
+    accuracy = float(correct / total)
+
+    result = {'metric_per_case': results, 'mean': means, 'foreground_mean': foreground_mean,
+              'classification_accuracy': accuracy, 'classification_confusion_matrix': classification_confusion_matrix.tolist()}
     if output_file is not None:
         save_summary_json(result, output_file)
     return result

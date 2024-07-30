@@ -47,6 +47,8 @@ class nnUNetDataset(object):
             self.dataset[c]['properties_file'] = join(folder, f"{c}.pkl")
             if folder_with_segs_from_previous_stage is not None:
                 self.dataset[c]['seg_from_prev_stage_file'] = join(folder_with_segs_from_previous_stage, f"{c}.npz")
+            # TODO: Make this better
+            self.dataset[c]['class_label'] = int(c.split("_")[1])
 
         if len(case_identifiers) <= num_images_properties_loading_threshold:
             for i in self.dataset.keys():
@@ -108,7 +110,7 @@ class nnUNetDataset(object):
                 seg_prev = np.load(entry['seg_from_prev_stage_file'])['seg']
             seg = np.vstack((seg, seg_prev[None]))
 
-        return data, seg, entry['properties']
+        return data, seg, entry['class_label'], entry['properties']
 
 
 if __name__ == '__main__':
@@ -143,4 +145,3 @@ if __name__ == '__main__':
         print('all good')
         # move file back
         shutil.move(join(folder, 'liver_XXX.pkl'), join(folder, 'liver_0.pkl'))
-

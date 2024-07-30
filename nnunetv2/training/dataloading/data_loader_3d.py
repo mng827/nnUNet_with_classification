@@ -12,6 +12,7 @@ class nnUNetDataLoader3D(nnUNetDataLoaderBase):
         # preallocate memory for data and seg
         data_all = np.zeros(self.data_shape, dtype=np.float32)
         seg_all = np.zeros(self.seg_shape, dtype=np.int16)
+        class_label_all = np.zeros(self.batch_size, dtype=np.int16)
         case_properties = []
 
         for j, i in enumerate(selected_keys):
@@ -19,7 +20,7 @@ class nnUNetDataLoader3D(nnUNetDataLoaderBase):
             # (Lung for example)
             force_fg = self.get_do_oversample(j)
 
-            data, seg, properties = self._data.load_case(i)
+            data, seg, class_label, properties = self._data.load_case(i)
             case_properties.append(properties)
 
             # If we are doing the cascade then the segmentation from the previous stage will already have been loaded by
@@ -49,12 +50,14 @@ class nnUNetDataLoader3D(nnUNetDataLoaderBase):
             padding = ((0, 0), *padding)
             data_all[j] = np.pad(data, padding, 'constant', constant_values=0)
             seg_all[j] = np.pad(seg, padding, 'constant', constant_values=-1)
+            class_label_all[j] = class_label
 
         if self.transforms is not None:
             with torch.no_grad():
                 with threadpool_limits(limits=1, user_api=None):
                     data_all = torch.from_numpy(data_all).float()
                     seg_all = torch.from_numpy(seg_all).to(torch.int16)
+                    class_label_all = torch.from_numpy(class_label_all).to(torch.int16)
                     images = []
                     segs = []
                     for b in range(self.batch_size):
@@ -68,9 +71,9 @@ class nnUNetDataLoader3D(nnUNetDataLoaderBase):
                         seg_all = torch.stack(segs)
                     del segs, images
 
-            return {'data': data_all, 'target': seg_all, 'keys': selected_keys}
+            return {'data': data_all, 'target': seg_all, 'keys': selected_keys, 'class_label': class_label_all}
 
-        return {'data': data_all, 'target': seg_all, 'keys': selected_keys}
+        return {'data': data_all, 'target': seg_all, 'keys': selected_keys, 'class_label': class_label_all}
 
 
 if __name__ == '__main__':

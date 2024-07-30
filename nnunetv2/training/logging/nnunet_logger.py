@@ -19,8 +19,11 @@ class nnUNetLogger(object):
             'mean_fg_dice': list(),
             'ema_fg_dice': list(),
             'dice_per_class_or_region': list(),
-            'train_losses': list(),
-            'val_losses': list(),
+            'val_classification_accuracy': list(),
+            'train_total_losses': list(),
+            'val_total_losses': list(),
+            'train_cls_losses': list(),
+            'val_cls_losses': list(),
             'lrs': list(),
             'epoch_start_timestamps': list(),
             'epoch_end_timestamps': list()
@@ -55,13 +58,13 @@ class nnUNetLogger(object):
         # we infer the epoch form our internal logging
         epoch = min([len(i) for i in self.my_fantastic_logging.values()]) - 1  # lists of epoch 0 have len 1
         sns.set(font_scale=2.5)
-        fig, ax_all = plt.subplots(3, 1, figsize=(30, 54))
+        fig, ax_all = plt.subplots(4, 1, figsize=(30, 54))
         # regular progress.png as we are used to from previous nnU-Net versions
         ax = ax_all[0]
         ax2 = ax.twinx()
         x_values = list(range(epoch + 1))
-        ax.plot(x_values, self.my_fantastic_logging['train_losses'][:epoch + 1], color='b', ls='-', label="loss_tr", linewidth=4)
-        ax.plot(x_values, self.my_fantastic_logging['val_losses'][:epoch + 1], color='r', ls='-', label="loss_val", linewidth=4)
+        ax.plot(x_values, self.my_fantastic_logging['train_total_losses'][:epoch + 1], color='b', ls='-', label="loss_tr", linewidth=4)
+        ax.plot(x_values, self.my_fantastic_logging['val_total_losses'][:epoch + 1], color='r', ls='-', label="loss_val", linewidth=4)
         ax2.plot(x_values, self.my_fantastic_logging['mean_fg_dice'][:epoch + 1], color='g', ls='dotted', label="pseudo dice",
                  linewidth=3)
         ax2.plot(x_values, self.my_fantastic_logging['ema_fg_dice'][:epoch + 1], color='g', ls='-', label="pseudo dice (mov. avg.)",
@@ -72,9 +75,22 @@ class nnUNetLogger(object):
         ax.legend(loc=(0, 1))
         ax2.legend(loc=(0.2, 1))
 
+        ax = ax_all[1]
+        ax2 = ax.twinx()
+        x_values = list(range(epoch + 1))
+        ax.plot(x_values, self.my_fantastic_logging['train_cls_losses'][:epoch + 1], color='b', ls='-', label="cls_loss_tr", linewidth=4)
+        ax.plot(x_values, self.my_fantastic_logging['val_cls_losses'][:epoch + 1], color='r', ls='-', label="cls_loss_val", linewidth=4)
+        ax2.plot(x_values, self.my_fantastic_logging['val_classification_accuracy'][:epoch + 1], color='g', ls='dotted', label="cls accuracy",
+                 linewidth=3)
+        ax.set_xlabel("epoch")
+        ax.set_ylabel("classification loss")
+        ax2.set_ylabel("classification accuracy")
+        ax.legend(loc=(0, 1))
+        ax2.legend(loc=(0.2, 1))
+
         # epoch times to see whether the training speed is consistent (inconsistent means there are other jobs
         # clogging up the system)
-        ax = ax_all[1]
+        ax = ax_all[2]
         ax.plot(x_values, [i - j for i, j in zip(self.my_fantastic_logging['epoch_end_timestamps'][:epoch + 1],
                                                  self.my_fantastic_logging['epoch_start_timestamps'])][:epoch + 1], color='b',
                 ls='-', label="epoch duration", linewidth=4)
@@ -85,7 +101,7 @@ class nnUNetLogger(object):
         ax.legend(loc=(0, 1))
 
         # learning rate
-        ax = ax_all[2]
+        ax = ax_all[3]
         ax.plot(x_values, self.my_fantastic_logging['lrs'][:epoch + 1], color='b', ls='-', label="learning rate", linewidth=4)
         ax.set_xlabel("epoch")
         ax.set_ylabel("learning rate")

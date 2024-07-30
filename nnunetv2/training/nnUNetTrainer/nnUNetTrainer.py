@@ -1,6 +1,7 @@
 import inspect
 import multiprocessing
 import os
+import pandas as pd
 import shutil
 import sys
 import warnings
@@ -227,6 +228,7 @@ class nnUNetTrainer(object):
                 self.network = DDP(self.network, device_ids=[self.local_rank])
 
             self.loss = self._build_loss()
+            self.classification_loss = nn.CrossEntropyLoss()
             # torch 2.2.2 crashes upon compiling CE loss
             # if self._do_i_compile():
             #     self.loss = torch.compile(self.loss)
@@ -978,8 +980,10 @@ class nnUNetTrainer(object):
     def train_step(self, batch: dict) -> dict:
         data = batch['data']
         target = batch['target']
+        class_label = batch['class_label']
 
         data = data.to(self.device, non_blocking=True)
+        class_label = class_label.to(self.device, non_blocking=True)
         if isinstance(target, list):
             target = [i.to(self.device, non_blocking=True) for i in target]
         else:
@@ -991,9 +995,11 @@ class nnUNetTrainer(object):
         # If the device_type is 'mps' then it will complain that mps is not implemented, even if enabled=False is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
         # So autocast will only be active if we have a cuda device.
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
-            output = self.network(data)
+            seg_output, class_output = self.network(data)
             # del data
-            l = self.loss(output, target)
+            seg_loss = self.loss(seg_output, target)
+            cls_loss = self.classification_loss(class_output, class_label.long())
+            l = seg_loss + cls_loss
 
         if self.grad_scaler is not None:
             self.grad_scaler.scale(l).backward()
@@ -1005,19 +1011,27 @@ class nnUNetTrainer(object):
             l.backward()
             torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
             self.optimizer.step()
-        return {'loss': l.detach().cpu().numpy()}
+        return {'total_loss': l.detach().cpu().numpy(),
+                'seg_loss': seg_loss.detach().cpu().numpy(),
+                'cls_loss': cls_loss.detach().cpu().numpy() }
 
     def on_train_epoch_end(self, train_outputs: List[dict]):
         outputs = collate_outputs(train_outputs)
 
         if self.is_ddp:
             losses_tr = [None for _ in range(dist.get_world_size())]
-            dist.all_gather_object(losses_tr, outputs['loss'])
+            dist.all_gather_object(losses_tr, outputs['total_loss'])
             loss_here = np.vstack(losses_tr).mean()
-        else:
-            loss_here = np.mean(outputs['loss'])
 
-        self.logger.log('train_losses', loss_here, self.current_epoch)
+            losses_cls = [None for _ in range(dist.get_world_size())]
+            dist.all_gather_object(losses_cls, outputs['cls_loss'])
+            cls_loss_here = np.vstack(losses_cls).mean()
+        else:
+            loss_here = np.mean(outputs['total_loss'])
+            cls_loss_here = np.mean(outputs['cls_loss'])
+
+        self.logger.log('train_total_losses', loss_here, self.current_epoch)
+        self.logger.log('train_cls_losses', cls_loss_here, self.current_epoch)
 
     def on_validation_epoch_start(self):
         self.network.eval()
@@ -1025,8 +1039,10 @@ class nnUNetTrainer(object):
     def validation_step(self, batch: dict) -> dict:
         data = batch['data']
         target = batch['target']
+        class_label = batch['class_label']
 
         data = data.to(self.device, non_blocking=True)
+        class_label = class_label.to(self.device, non_blocking=True)
         if isinstance(target, list):
             target = [i.to(self.device, non_blocking=True) for i in target]
         else:
@@ -1037,24 +1053,26 @@ class nnUNetTrainer(object):
         # If the device_type is 'mps' then it will complain that mps is not implemented, even if enabled=False is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
         # So autocast will only be active if we have a cuda device.
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
-            output = self.network(data)
+            seg_output, class_output = self.network(data)
             del data
-            l = self.loss(output, target)
+            seg_loss = self.loss(seg_output, target)
+            cls_loss = self.classification_loss(class_output, class_label.long())
+            l = seg_loss + cls_loss
 
         # we only need the output with the highest output resolution (if DS enabled)
         if self.enable_deep_supervision:
-            output = output[0]
+            seg_output = seg_output[0]
             target = target[0]
 
         # the following is needed for online evaluation. Fake dice (green line)
-        axes = [0] + list(range(2, output.ndim))
+        axes = [0] + list(range(2, seg_output.ndim))
 
         if self.label_manager.has_regions:
-            predicted_segmentation_onehot = (torch.sigmoid(output) > 0.5).long()
+            predicted_segmentation_onehot = (torch.sigmoid(seg_output) > 0.5).long()
         else:
             # no need for softmax
-            output_seg = output.argmax(1)[:, None]
-            predicted_segmentation_onehot = torch.zeros(output.shape, device=output.device, dtype=torch.float32)
+            output_seg = seg_output.argmax(1)[:, None]
+            predicted_segmentation_onehot = torch.zeros(seg_output.shape, device=seg_output.device, dtype=torch.float32)
             predicted_segmentation_onehot.scatter_(1, output_seg, 1)
             del output_seg
 
@@ -1087,13 +1105,25 @@ class nnUNetTrainer(object):
             fp_hard = fp_hard[1:]
             fn_hard = fn_hard[1:]
 
-        return {'loss': l.detach().cpu().numpy(), 'tp_hard': tp_hard, 'fp_hard': fp_hard, 'fn_hard': fn_hard}
+        predicted_class = class_output.argmax(1)
+        num_classification_correct = torch.sum(predicted_class == class_label)
+        num_classification_total = predicted_class.shape[0]
+
+        return {'total_loss': l.detach().cpu().numpy(),
+                'seg_loss': seg_loss.detach().cpu().numpy(),
+                'cls_loss': cls_loss.detach().cpu().numpy(),
+                'num_classification_correct': num_classification_correct.detach().cpu().numpy(),
+                'num_classification_total': num_classification_total,
+                'tp_hard': tp_hard, 'fp_hard': fp_hard, 'fn_hard': fn_hard}
 
     def on_validation_epoch_end(self, val_outputs: List[dict]):
         outputs_collated = collate_outputs(val_outputs)
         tp = np.sum(outputs_collated['tp_hard'], 0)
         fp = np.sum(outputs_collated['fp_hard'], 0)
         fn = np.sum(outputs_collated['fn_hard'], 0)
+        num_classification_correct = np.sum(outputs_collated['num_classification_correct'])
+        num_classification_total = np.sum(outputs_collated['num_classification_total'])
+        classification_accuracy = num_classification_correct / num_classification_total
 
         if self.is_ddp:
             world_size = dist.get_world_size()
@@ -1111,16 +1141,23 @@ class nnUNetTrainer(object):
             fn = np.vstack([i[None] for i in fns]).sum(0)
 
             losses_val = [None for _ in range(world_size)]
-            dist.all_gather_object(losses_val, outputs_collated['loss'])
+            dist.all_gather_object(losses_val, outputs_collated['total_loss'])
             loss_here = np.vstack(losses_val).mean()
+
+            cls_losses_val = [None for _ in range(world_size)]
+            dist.all_gather_object(cls_losses_val, outputs_collated['cls_loss'])
+            cls_loss_here = np.vstack(cls_losses_val).mean()
         else:
-            loss_here = np.mean(outputs_collated['loss'])
+            loss_here = np.mean(outputs_collated['total_loss'])
+            cls_loss_here = np.mean(outputs_collated['cls_loss'])
 
         global_dc_per_class = [i for i in [2 * i / (2 * i + j + k) for i, j, k in zip(tp, fp, fn)]]
         mean_fg_dice = np.nanmean(global_dc_per_class)
         self.logger.log('mean_fg_dice', mean_fg_dice, self.current_epoch)
         self.logger.log('dice_per_class_or_region', global_dc_per_class, self.current_epoch)
-        self.logger.log('val_losses', loss_here, self.current_epoch)
+        self.logger.log('val_classification_accuracy', classification_accuracy, self.current_epoch)
+        self.logger.log('val_total_losses', loss_here, self.current_epoch)
+        self.logger.log('val_cls_losses', cls_loss_here, self.current_epoch)
 
     def on_epoch_start(self):
         self.logger.log('epoch_start_timestamps', time(), self.current_epoch)
@@ -1128,10 +1165,13 @@ class nnUNetTrainer(object):
     def on_epoch_end(self):
         self.logger.log('epoch_end_timestamps', time(), self.current_epoch)
 
-        self.print_to_log_file('train_loss', np.round(self.logger.my_fantastic_logging['train_losses'][-1], decimals=4))
-        self.print_to_log_file('val_loss', np.round(self.logger.my_fantastic_logging['val_losses'][-1], decimals=4))
+        self.print_to_log_file('train_total_loss', np.round(self.logger.my_fantastic_logging['train_total_losses'][-1], decimals=4))
+        self.print_to_log_file('val_total_loss', np.round(self.logger.my_fantastic_logging['val_total_losses'][-1], decimals=4))
+        self.print_to_log_file('train_cls_loss', np.round(self.logger.my_fantastic_logging['train_cls_losses'][-1], decimals=4))
+        self.print_to_log_file('val_cls_loss', np.round(self.logger.my_fantastic_logging['val_cls_losses'][-1], decimals=4))
         self.print_to_log_file('Pseudo dice', [np.round(i, decimals=4) for i in
                                                self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]])
+        self.print_to_log_file('Val classification accuracy', np.round(self.logger.my_fantastic_logging['val_classification_accuracy'][-1], decimals=4))
         self.print_to_log_file(
             f"Epoch time: {np.round(self.logger.my_fantastic_logging['epoch_end_timestamps'][-1] - self.logger.my_fantastic_logging['epoch_start_timestamps'][-1], decimals=2)} s")
 
@@ -1240,6 +1280,9 @@ class nnUNetTrainer(object):
             validation_output_folder = join(self.output_folder, 'validation')
             maybe_mkdir_p(validation_output_folder)
 
+            df = pd.DataFrame(columns=['Names', 'GT_Subtype', 'Pred_Subtype'])
+            classification_output_file = join(validation_output_folder, "subtype_results.csv")
+
             # we cannot use self.get_tr_and_val_datasets() here because we might be DDP and then we have to distribute
             # the validation keys across the workers.
             _, val_keys = self.do_split()
@@ -1270,7 +1313,7 @@ class nnUNetTrainer(object):
                                                                allowed_num_queued=2)
 
                 self.print_to_log_file(f"predicting {k}")
-                data, seg, properties = dataset_val.load_case(k)
+                data, seg, class_label, properties = dataset_val.load_case(k)
 
                 if self.is_cascaded:
                     data = np.vstack((data, convert_labelmap_to_one_hot(seg[-1], self.label_manager.foreground_labels,
@@ -1283,8 +1326,14 @@ class nnUNetTrainer(object):
                 self.print_to_log_file(f'{k}, shape {data.shape}, rank {self.local_rank}')
                 output_filename_truncated = join(validation_output_folder, k)
 
-                prediction = predictor.predict_sliding_window_return_logits(data)
-                prediction = prediction.cpu()
+                prediction, class_logit = predictor.predict_sliding_window_return_logits(data)
+                prediction, class_logit = prediction.cpu(), class_logit.cpu()
+
+                class_prediction = torch.argmax(class_logit).item()
+
+                row = pd.DataFrame([[f'{k}.nii.gz', class_label, class_prediction]], columns=['Names', 'GT_Subtype', 'Pred_Subtype'])
+                df = pd.concat([df, row], ignore_index=True)
+                df.to_csv(classification_output_file, index=False, na_rep='nan')
 
                 # this needs to go into background processes
                 results.append(
@@ -1336,6 +1385,7 @@ class nnUNetTrainer(object):
                     dist.barrier()
 
             _ = [r.get() for r in results]
+            df.to_csv(classification_output_file, index=False, na_rep='nan')
 
         if self.is_ddp:
             dist.barrier()
@@ -1353,6 +1403,8 @@ class nnUNetTrainer(object):
                                                 self.is_ddp else default_num_processes)
             self.print_to_log_file("Validation complete", also_print_to_console=True)
             self.print_to_log_file("Mean Validation Dice: ", (metrics['foreground_mean']["Dice"]),
+                                   also_print_to_console=True)
+            self.print_to_log_file("Validation Classification Accuracy: ", metrics['classification_accuracy'],
                                    also_print_to_console=True)
 
         self.set_deep_supervision_enabled(True)

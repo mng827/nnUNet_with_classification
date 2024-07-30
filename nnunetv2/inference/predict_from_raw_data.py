@@ -2,6 +2,7 @@ import inspect
 import itertools
 import multiprocessing
 import os
+import pandas as pd
 from copy import deepcopy
 from time import sleep
 from typing import Tuple, Union, List, Optional
@@ -217,6 +218,7 @@ class nnUNetPredictor(object):
         else:
             output_folder = None
 
+        self.output_folder = output_folder
         ########################
         # let's store the input arguments so that its clear what was used to generate the prediction
         if output_folder is not None:
@@ -345,6 +347,9 @@ class nnUNetPredictor(object):
         each element returned by data_iterator must be a dict with 'data', 'ofile' and 'data_properties' keys!
         If 'ofile' is None, the result will be returned instead of written to a file
         """
+        df = pd.DataFrame(columns=['Names', 'Subtype'])
+        classification_output_file = join(self.output_folder, "subtype_results.csv")
+
         with multiprocessing.get_context("spawn").Pool(num_processes_segmentation_export) as export_pool:
             worker_list = [i for i in export_pool._pool]
             r = []
@@ -372,7 +377,14 @@ class nnUNetPredictor(object):
                     sleep(0.1)
                     proceed = not check_workers_alive_and_busy(export_pool, worker_list, r, allowed_num_queued=2)
 
-                prediction = self.predict_logits_from_preprocessed_data(data).cpu()
+                prediction, class_logit = self.predict_logits_from_preprocessed_data(data)
+                prediction, class_logit = prediction.cpu(), class_logit.cpu()
+
+                class_prediction = torch.argmax(class_logit).item()
+                name = os.path.basename(ofile)
+                row = pd.DataFrame([[f'{name}.nii.gz', class_prediction]], columns=['Names', 'Subtype'])
+                df = pd.concat([df, row], ignore_index=True)
+                df.to_csv(classification_output_file, index=False, na_rep='nan')
 
                 if ofile is not None:
                     # this needs to go into background processes
@@ -412,6 +424,8 @@ class nnUNetPredictor(object):
         if isinstance(data_iterator, MultiThreadedAugmenter):
             data_iterator._finish()
 
+        df.to_csv(classification_output_file, index=False, na_rep='nan')
+
         # clear lru cache
         compute_gaussian.cache_clear()
         # clear device cache
@@ -445,8 +459,10 @@ class nnUNetPredictor(object):
 
         if self.verbose:
             print('predicting')
-        predicted_logits = self.predict_logits_from_preprocessed_data(dct['data']).cpu()
+        predicted_logits, class_logits = self.predict_logits_from_preprocessed_data(dct['data'])
+        prediction, class_logit = prediction.cpu(), class_logit.cpu()
 
+        # output class_logits to file
         if self.verbose:
             print('resampling to original shape')
         if output_file_truncated is not None:
@@ -489,16 +505,20 @@ class nnUNetPredictor(object):
             # second iteration to crash due to OOM. Grabbing that with try except cause way more bloated code than
             # this actually saves computation time
             if prediction is None:
-                prediction = self.predict_sliding_window_return_logits(data).to('cpu')
+                prediction, class_logit = self.predict_sliding_window_return_logits(data)
+                prediction, class_logit = prediction.to('cpu'), class_logit.to('cpu')
             else:
-                prediction += self.predict_sliding_window_return_logits(data).to('cpu')
+                cur_prediction, cur_class_logit = self.predict_sliding_window_return_logits(data).to('cpu')
+                prediction += cur_prediction.to('cpu')
+                class_logit += cur_class_logit.to('cpu')
 
         if len(self.list_of_parameters) > 1:
             prediction /= len(self.list_of_parameters)
+            class_logit /= len(self.list_of_parameters)
 
         if self.verbose: print('Prediction done')
         torch.set_num_threads(n_threads)
-        return prediction
+        return prediction, class_logit
 
     def _internal_get_sliding_window_slicers(self, image_size: Tuple[int, ...]):
         slicers = []
@@ -536,7 +556,7 @@ class nnUNetPredictor(object):
 
     def _internal_maybe_mirror_and_predict(self, x: torch.Tensor) -> torch.Tensor:
         mirror_axes = self.allowed_mirroring_axes if self.use_mirroring else None
-        prediction = self.network(x)
+        seg_output, class_output = self.network(x)
 
         if mirror_axes is not None:
             # check for invalid numbers in mirror_axes
@@ -548,9 +568,12 @@ class nnUNetPredictor(object):
                 c for i in range(len(mirror_axes)) for c in itertools.combinations(mirror_axes, i + 1)
             ]
             for axes in axes_combinations:
-                prediction += torch.flip(self.network(torch.flip(x, axes)), axes)
-            prediction /= (len(axes_combinations) + 1)
-        return prediction
+                seg_output, class_output = self.network(torch.flip(x, axes))
+                seg_output += torch.flip(seg_output, axes)
+                class_output += class_output
+            seg_output /= (len(axes_combinations) + 1)
+            class_output /= (len(axes_combinations) + 1)
+        return seg_output, class_output
 
     def _internal_predict_sliding_window_return_logits(self,
                                                        data: torch.Tensor,
@@ -558,6 +581,7 @@ class nnUNetPredictor(object):
                                                        do_on_device: bool = True,
                                                        ):
         predicted_logits = n_predictions = prediction = gaussian = workon = None
+        class_logits = None
         results_device = self.device if do_on_device else torch.device('cpu')
 
         try:
@@ -575,6 +599,8 @@ class nnUNetPredictor(object):
                                            dtype=torch.half,
                                            device=results_device)
             n_predictions = torch.zeros(data.shape[1:], dtype=torch.half, device=results_device)
+            # TODO: The shape should be number of classes
+            class_logits = torch.zeros((3), dtype=torch.half, device=results_device)
 
             if self.use_gaussian:
                 gaussian = compute_gaussian(tuple(self.configuration_manager.patch_size), sigma_scale=1. / 8,
@@ -589,14 +615,19 @@ class nnUNetPredictor(object):
                 workon = data[sl][None]
                 workon = workon.to(self.device)
 
-                prediction = self._internal_maybe_mirror_and_predict(workon)[0].to(results_device)
+                prediction, class_logits_patch = self._internal_maybe_mirror_and_predict(workon)
+                prediction = prediction[0].to(results_device)
+                class_logits_patch = class_logits_patch[0].to(results_device)
 
                 if self.use_gaussian:
                     prediction *= gaussian
                 predicted_logits[sl] += prediction
                 n_predictions[sl[1:]] += gaussian
 
+                class_logits += class_logits_patch
+
             predicted_logits /= n_predictions
+            class_logits /= len(slicers)
             # check for infs
             if torch.any(torch.isinf(predicted_logits)):
                 raise RuntimeError('Encountered inf in predicted array. Aborting... If this problem persists, '
@@ -604,10 +635,11 @@ class nnUNetPredictor(object):
                                    'predicted_logits to fp32')
         except Exception as e:
             del predicted_logits, n_predictions, prediction, gaussian, workon
+            del class_logits
             empty_cache(self.device)
             empty_cache(results_device)
             raise e
-        return predicted_logits
+        return predicted_logits, class_logits
 
     def predict_sliding_window_return_logits(self, input_image: torch.Tensor) \
             -> Union[np.ndarray, torch.Tensor]:
@@ -642,21 +674,21 @@ class nnUNetPredictor(object):
                 if self.perform_everything_on_device and self.device != 'cpu':
                     # we need to try except here because we can run OOM in which case we need to fall back to CPU as a results device
                     try:
-                        predicted_logits = self._internal_predict_sliding_window_return_logits(data, slicers,
+                        predicted_logits, class_logits = self._internal_predict_sliding_window_return_logits(data, slicers,
                                                                                                self.perform_everything_on_device)
                     except RuntimeError:
                         print(
                             'Prediction on device was unsuccessful, probably due to a lack of memory. Moving results arrays to CPU')
                         empty_cache(self.device)
-                        predicted_logits = self._internal_predict_sliding_window_return_logits(data, slicers, False)
+                        predicted_logits, class_logits = self._internal_predict_sliding_window_return_logits(data, slicers, False)
                 else:
-                    predicted_logits = self._internal_predict_sliding_window_return_logits(data, slicers,
+                    predicted_logits, class_logits = self._internal_predict_sliding_window_return_logits(data, slicers,
                                                                                            self.perform_everything_on_device)
 
                 empty_cache(self.device)
                 # revert padding
                 predicted_logits = predicted_logits[(slice(None), *slicer_revert_padding[1:])]
-        return predicted_logits
+        return predicted_logits, class_logits
 
 
 def predict_entry_point_modelfolder():
