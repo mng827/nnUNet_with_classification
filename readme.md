@@ -1,6 +1,6 @@
 ### Setup
 
-1. Create a virtual environment and install PyTorch.
+1. Create a virtual environment and install PyTorch following the official documentation.
 
 2. Install nnUNet from this repository
 ```
@@ -48,7 +48,7 @@ nnUNetv2_train 100 3d_fullres 0 -tr nnUNetTrainerWithClassificationHead
 The checkpoints and training logs will be saved in `${nnUNet_results}/Dataset100_UHNMedImg3D/nnUNetTrainerWithClassificationHead__nnUNetPlans__3d_fullres/fold_0`
 
 ### Trained Models
-Trained weights can be found in [here](nnUNet_results).
+Trained weights can be found in [here](https://drive.google.com/file/d/1geT7yZUrNLrO-MSw3yYavfL0hu_mIkWL/view?usp=sharing).
 
 ### Validation
 ```
