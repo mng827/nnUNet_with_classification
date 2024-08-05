@@ -568,9 +568,9 @@ class nnUNetPredictor(object):
                 c for i in range(len(mirror_axes)) for c in itertools.combinations(mirror_axes, i + 1)
             ]
             for axes in axes_combinations:
-                seg_output, class_output = self.network(torch.flip(x, axes))
-                seg_output += torch.flip(seg_output, axes)
-                class_output += class_output
+                seg_output_flipped, class_output_flipped = self.network(torch.flip(x, axes))
+                seg_output += torch.flip(seg_output_flipped, axes)
+                class_output += class_output_flipped
             seg_output /= (len(axes_combinations) + 1)
             class_output /= (len(axes_combinations) + 1)
         return seg_output, class_output

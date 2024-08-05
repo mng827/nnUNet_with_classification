@@ -19,6 +19,7 @@ class nnUNetLogger(object):
             'mean_fg_dice': list(),
             'ema_fg_dice': list(),
             'dice_per_class_or_region': list(),
+            'dice_per_class_or_region_per_batch': list(),
             'val_classification_accuracy': list(),
             'train_total_losses': list(),
             'val_total_losses': list(),
@@ -80,7 +81,7 @@ class nnUNetLogger(object):
         x_values = list(range(epoch + 1))
         ax.plot(x_values, self.my_fantastic_logging['train_cls_losses'][:epoch + 1], color='b', ls='-', label="cls_loss_tr", linewidth=4)
         ax.plot(x_values, self.my_fantastic_logging['val_cls_losses'][:epoch + 1], color='r', ls='-', label="cls_loss_val", linewidth=4)
-        ax2.plot(x_values, self.my_fantastic_logging['val_classification_accuracy'][:epoch + 1], color='g', ls='dotted', label="cls accuracy",
+        ax2.plot(x_values, self.my_fantastic_logging['val_classification_accuracy'][:epoch + 1], color='g', ls='-', label="cls accuracy",
                  linewidth=3)
         ax.set_xlabel("epoch")
         ax.set_ylabel("classification loss")

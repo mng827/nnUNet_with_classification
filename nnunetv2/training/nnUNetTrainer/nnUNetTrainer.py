@@ -409,6 +409,7 @@ class nnUNetTrainer(object):
         if self.enable_deep_supervision:
             deep_supervision_scales = self._get_deep_supervision_scales()
             weights = np.array([1 / (2 ** i) for i in range(len(deep_supervision_scales))])
+            print("deep supervision weights: ", weights)
             if self.is_ddp and not self._do_i_compile():
                 # very strange and stupid interaction. DDP crashes and complains about unused parameters due to
                 # weights[-1] = 0. Interestingly this crash doesn't happen with torch.compile enabled. Strange stuff.
@@ -667,6 +668,8 @@ class nnUNetTrainer(object):
                                         oversample_foreground_percent=self.oversample_foreground_percent,
                                         sampling_probabilities=None, pad_sides=None, transforms=val_transforms)
         else:
+            print("Initial patch size: ", initial_patch_size)
+            print("Final patch size: ", self.configuration_manager.patch_size)
             dl_tr = nnUNetDataLoader3D(dataset_tr, self.batch_size,
                                        initial_patch_size,
                                        self.configuration_manager.patch_size,
@@ -1105,6 +1108,8 @@ class nnUNetTrainer(object):
             fp_hard = fp_hard[1:]
             fn_hard = fn_hard[1:]
 
+        dc_per_batch = [i for i in [2 * i / (2 * i + j + k) for i, j, k in zip(tp_hard, fp_hard, fn_hard)]]
+
         predicted_class = class_output.argmax(1)
         num_classification_correct = torch.sum(predicted_class == class_label)
         num_classification_total = predicted_class.shape[0]
@@ -1114,13 +1119,15 @@ class nnUNetTrainer(object):
                 'cls_loss': cls_loss.detach().cpu().numpy(),
                 'num_classification_correct': num_classification_correct.detach().cpu().numpy(),
                 'num_classification_total': num_classification_total,
-                'tp_hard': tp_hard, 'fp_hard': fp_hard, 'fn_hard': fn_hard}
+                'tp_hard': tp_hard, 'fp_hard': fp_hard, 'fn_hard': fn_hard,
+                'dc_per_batch': np.array(dc_per_batch)}
 
     def on_validation_epoch_end(self, val_outputs: List[dict]):
         outputs_collated = collate_outputs(val_outputs)
         tp = np.sum(outputs_collated['tp_hard'], 0)
         fp = np.sum(outputs_collated['fp_hard'], 0)
         fn = np.sum(outputs_collated['fn_hard'], 0)
+        dc_per_class_per_batch = np.nanmean(outputs_collated['dc_per_batch'], 0)
         num_classification_correct = np.sum(outputs_collated['num_classification_correct'])
         num_classification_total = np.sum(outputs_collated['num_classification_total'])
         classification_accuracy = num_classification_correct / num_classification_total
@@ -1155,6 +1162,7 @@ class nnUNetTrainer(object):
         mean_fg_dice = np.nanmean(global_dc_per_class)
         self.logger.log('mean_fg_dice', mean_fg_dice, self.current_epoch)
         self.logger.log('dice_per_class_or_region', global_dc_per_class, self.current_epoch)
+        self.logger.log('dice_per_class_or_region_per_batch', dc_per_class_per_batch, self.current_epoch)
         self.logger.log('val_classification_accuracy', classification_accuracy, self.current_epoch)
         self.logger.log('val_total_losses', loss_here, self.current_epoch)
         self.logger.log('val_cls_losses', cls_loss_here, self.current_epoch)
@@ -1169,9 +1177,10 @@ class nnUNetTrainer(object):
         self.print_to_log_file('val_total_loss', np.round(self.logger.my_fantastic_logging['val_total_losses'][-1], decimals=4))
         self.print_to_log_file('train_cls_loss', np.round(self.logger.my_fantastic_logging['train_cls_losses'][-1], decimals=4))
         self.print_to_log_file('val_cls_loss', np.round(self.logger.my_fantastic_logging['val_cls_losses'][-1], decimals=4))
-        self.print_to_log_file('Pseudo dice', [np.round(i, decimals=4) for i in
+        self.print_to_log_file('val pseudo dice', [np.round(i, decimals=4) for i in
                                                self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]])
-        self.print_to_log_file('Val classification accuracy', np.round(self.logger.my_fantastic_logging['val_classification_accuracy'][-1], decimals=4))
+        self.print_to_log_file('val dice per batch', np.round(self.logger.my_fantastic_logging['dice_per_class_or_region_per_batch'][-1], decimals=4))
+        self.print_to_log_file('val classification accuracy', np.round(self.logger.my_fantastic_logging['val_classification_accuracy'][-1], decimals=4))
         self.print_to_log_file(
             f"Epoch time: {np.round(self.logger.my_fantastic_logging['epoch_end_timestamps'][-1] - self.logger.my_fantastic_logging['epoch_start_timestamps'][-1], decimals=2)} s")
 

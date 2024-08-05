@@ -2,7 +2,7 @@ from typing import Union, Tuple, List
 from dynamic_network_architectures.building_blocks.helper import get_matching_batchnorm
 import torch
 from torch import nn
-
+from torch.optim.lr_scheduler import StepLR
 from nnunetv2.training.lr_scheduler.polylr import PolyLRScheduler
 
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
@@ -57,9 +57,10 @@ class SegmentationNetworkWithClassificationHead(nn.Module):
 
 class nnUNetTrainerWithClassificationHead(nnUNetTrainer):
     def configure_optimizers(self):
-        self.initial_lr = 1e-4
+        self.initial_lr = 3e-4
         optimizer = torch.optim.Adam(self.network.parameters(), lr=self.initial_lr, weight_decay=self.weight_decay)
-        lr_scheduler = PolyLRScheduler(optimizer, self.initial_lr, self.num_epochs)
+        lr_scheduler = StepLR(optimizer, step_size=100, gamma=0.1)
+        # lr_scheduler = PolyLRScheduler(optimizer, self.initial_lr, self.num_epochs)
         return optimizer, lr_scheduler
 
     @staticmethod
