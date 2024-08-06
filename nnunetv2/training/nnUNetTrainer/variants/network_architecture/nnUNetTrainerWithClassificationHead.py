@@ -59,7 +59,7 @@ class nnUNetTrainerWithClassificationHead(nnUNetTrainer):
     def configure_optimizers(self):
         self.initial_lr = 3e-4
         optimizer = torch.optim.Adam(self.network.parameters(), lr=self.initial_lr, weight_decay=self.weight_decay)
-        lr_scheduler = StepLR(optimizer, step_size=100, gamma=0.1)
+        lr_scheduler = StepLR(optimizer, step_size=75, gamma=0.1)
         # lr_scheduler = PolyLRScheduler(optimizer, self.initial_lr, self.num_epochs)
         return optimizer, lr_scheduler
 

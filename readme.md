@@ -37,7 +37,7 @@ where `<path_to_dataset>` is the path to the downloaded data containing the `tra
 ### Preprocessing
 Run this command to generate the nnUNet plans and resampled data.
 ```
-nnUNetv2_plan_and_preprocess -d 100 --verify_dataset_integrity
+nnUNetv2_plan_and_preprocess -d 100 --verify_dataset_integrity -c 3d_fullres -overwrite_target_spacing 1 0.75 0.75 -gpu_memory_target 16
 ```
 
 ### Training
@@ -48,7 +48,7 @@ nnUNetv2_train 100 3d_fullres 0 -tr nnUNetTrainerWithClassificationHead
 The checkpoints and training logs will be saved in `${nnUNet_results}/Dataset100_UHNMedImg3D/nnUNetTrainerWithClassificationHead__nnUNetPlans__3d_fullres/fold_0`
 
 ### Trained Models
-Trained weights can be found in [here](https://drive.google.com/file/d/1geT7yZUrNLrO-MSw3yYavfL0hu_mIkWL/view?usp=sharing).
+Trained weights can be found in [here](https://drive.google.com/drive/folders/1H9FswdnBf8lEOJtIl22PVKrbEuw3SWn8?usp=sharing).
 
 ### Validation
 ```
